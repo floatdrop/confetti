@@ -149,6 +149,43 @@ func decodeFlagValue(target reflect.Value, val string) error {
 		return value.UnmarshalBinary([]byte(val))
 	}
 
+	applied, err := ref.SetCollection(target, val, ref.DefaultCollectionOpts(), elementDecoder())
+	if err != nil {
+		return err
+	}
+	if applied {
+		return nil
+	}
+
+	if !supportsDecode(target.Type()) {
+		return ErrUnsupported
+	}
+	return ref.SetValue(target, val)
+}
+
+// elementDecoder decodes items of a collection the same way as a standalone flag value.
+func elementDecoder() ref.ElementDecoder {
+	return ref.ElementDecoder{
+		Supports: supportsDecode,
+		Set: func(target reflect.Value, value string) (bool, error) {
+			err := decodeFlagValue(allocatePointer(target), value)
+			if errors.Is(err, ErrUnsupported) {
+				return false, nil
+			}
+			return err == nil, err
+		},
+	}
+}
+
+func supportsDecode(target reflect.Type) bool {
+	pointer := reflect.PointerTo(target)
+	if pointer.Implements(reflect.TypeFor[flag.Value]()) ||
+		pointer.Implements(reflect.TypeFor[sql.Scanner]()) ||
+		pointer.Implements(reflect.TypeFor[encoding.TextUnmarshaler]()) ||
+		pointer.Implements(reflect.TypeFor[encoding.BinaryUnmarshaler]()) {
+		return true
+	}
+
 	switch target.Kind() {
 	case reflect.String,
 		reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64, reflect.Int,
@@ -156,9 +193,9 @@ func decodeFlagValue(target reflect.Value, val string) error {
 		reflect.Float32, reflect.Float64,
 		reflect.Bool,
 		reflect.Complex64, reflect.Complex128:
-		return ref.SetValue(target, val)
+		return true
 	default:
-		return ErrUnsupported
+		return false
 	}
 }
 

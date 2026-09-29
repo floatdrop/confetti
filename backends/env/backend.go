@@ -18,6 +18,16 @@ type environOpts struct {
 	constructPrefix bool
 	prefix          string
 	prefixGlue      string
+	collection      ref.CollectionOpts
+	strict          bool
+}
+
+func defaultEnvironOpts() environOpts {
+	return environOpts{
+		tag:        "env",
+		prefixGlue: "_",
+		collection: ref.DefaultCollectionOpts(),
+	}
 }
 
 type loadContext struct {
@@ -42,10 +52,7 @@ func (c *loadContext) getPrefix(tag string) string {
 
 // FromEnviron loads values from environ to given struct
 func FromEnviron(opts ...EnvironOpt) func(context.Context, any) error {
-	envOpts := environOpts{
-		tag:        "env",
-		prefixGlue: "_",
-	}
+	envOpts := defaultEnvironOpts()
 	for _, opt := range opts {
 		opt(&envOpts)
 	}
@@ -74,7 +81,7 @@ func FromVar(key string) func(context.Context, any) error {
 			return fmt.Errorf("target for env key '%s' must be a pointer", key)
 		}
 
-		_, err := setValue(fv.Elem(), val)
+		_, err := setValue(fv.Elem(), val, defaultEnvironOpts())
 		return err
 	}
 }
@@ -103,12 +110,16 @@ func callback(ctx *ref.TraverseContext[loadContext], field ref.Node) error {
 		return nil
 	}
 
-	applied, err := setValue(field.Value, val)
+	applied, err := setValue(field.Value, val, ctx.Data.opts)
 	if err != nil {
-		return err
+		return fmt.Errorf("cannot set env variable %q: %w", key, err)
 	}
 	if applied {
 		field.Commit()
+		return nil
+	}
+	if ctx.Data.opts.strict && !ref.IsTraversable(field.Value.Type()) {
+		return fmt.Errorf("cannot set env variable %q: unsupported target type %s", key, field.Value.Type())
 	}
 	return nil
 }
@@ -125,7 +136,7 @@ func recursiveElemWithNew(target reflect.Value) reflect.Value {
 	return target
 }
 
-func setValue(refValue reflect.Value, val string) (bool, error) {
+func setValue(refValue reflect.Value, val string, opts environOpts) (bool, error) {
 	temporaryType := refValue.Type()
 	for temporaryType.Kind() == reflect.Ptr {
 		temporaryType = temporaryType.Elem()
@@ -136,7 +147,7 @@ func setValue(refValue reflect.Value, val string) (bool, error) {
 		temporary.Set(current)
 	}
 
-	applied, err := setTemporaryValue(temporary, val)
+	applied, err := setTemporaryValue(temporary, val, opts)
 	if err != nil || !applied {
 		return false, err
 	}
@@ -155,7 +166,7 @@ func pointerTerminal(refValue reflect.Value) (reflect.Value, bool) {
 	return refValue, true
 }
 
-func setTemporaryValue(refValue reflect.Value, val string) (bool, error) {
+func setTemporaryValue(refValue reflect.Value, val string, opts environOpts) (bool, error) {
 	// get pointer to value to check interfaces implementation properly
 	valuePtr := refValue.Addr().Interface()
 
@@ -181,19 +192,47 @@ func setTemporaryValue(refValue reflect.Value, val string) (bool, error) {
 		return err == nil, err
 	}
 
-	if !supportsSetValue(refValue) {
+	applied, err := ref.SetCollection(refValue, val, opts.collection, elementDecoder(opts))
+	if err != nil {
+		return false, err
+	}
+	if applied {
+		return true, nil
+	}
+
+	if !supportsSetValue(refValue.Type()) {
 		return false, nil
 	}
 
 	return true, ref.SetValue(refValue, val)
 }
 
-func supportsSetValue(value reflect.Value) bool {
-	if value.Type() == reflect.TypeFor[time.Duration]() {
+// elementDecoder decodes items of a collection the same way as a standalone value.
+func elementDecoder(opts environOpts) ref.ElementDecoder {
+	return ref.ElementDecoder{
+		Supports: supportsDecode,
+		Set: func(target reflect.Value, value string) (bool, error) {
+			return setValue(target, value, opts)
+		},
+	}
+}
+
+func supportsDecode(target reflect.Type) bool {
+	pointer := reflect.PointerTo(target)
+	if pointer.Implements(reflect.TypeFor[sql.Scanner]()) ||
+		pointer.Implements(reflect.TypeFor[encoding.TextUnmarshaler]()) ||
+		pointer.Implements(reflect.TypeFor[encoding.BinaryUnmarshaler]()) {
+		return true
+	}
+	return supportsSetValue(target)
+}
+
+func supportsSetValue(target reflect.Type) bool {
+	if target == reflect.TypeFor[time.Duration]() {
 		return true
 	}
 
-	switch value.Kind() {
+	switch target.Kind() {
 	case reflect.String,
 		reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64, reflect.Int,
 		reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uint,
