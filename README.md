@@ -106,6 +106,47 @@ func main() {
 }
 ```
 
+### Lists and maps
+
+The `env` and `flags` backends decode slices, arrays and maps from a single value.
+Items are separated by `,` and map keys are separated from their values by `=`:
+
+```go
+type Config struct {
+    Hosts  []string          `env:"HOSTS" flag:"hosts"`
+    Ports  [2]int            `env:"PORTS" flag:"ports"`
+    Labels map[string]string `env:"LABELS" flag:"labels"`
+}
+```
+
+```console
+HOSTS=first,second PORTS=80,443 LABELS=env=prod,tier=web ./app
+```
+
+A few details worth knowing:
+
+- the value fully defines the collection, so items missing from it are not carried
+  over from the current target value, and an empty value means an empty collection;
+- `[]byte` and `[N]byte` take the raw value instead of being split into items;
+- items may be pointers, and may implement `encoding.TextUnmarshaler`,
+  `encoding.BinaryUnmarshaler` or `sql.Scanner`;
+- collections of structs are filled by descending into them, as before. Only
+  collections of decodable items are read from a single value.
+
+In `env.FromEnviron` separators are configurable with the `env.ListSeparator` and
+`env.PairSeparator` options.
+
+Values that cannot be decoded at all are skipped silently. Pass the `env.Strict`
+option to `env.FromEnviron` to fail on a set environment variable that cannot be
+applied to its tagged field:
+
+```go
+err := confetti.Fill(ctx, &cfg, env.FromEnviron(env.Strict))
+```
+
+Tags on structs, slices and maps keep working as key prefixes under `env.Strict`,
+so only fields without nested values are reported.
+
 ### Available backends
 
 - [env](backends/env) - loads data from environment variables
